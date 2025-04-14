@@ -13,6 +13,11 @@ main()
   if(cpuid() == 0){
     consoleinit();
     printfinit();
+
+    log_message(INFO, "Welcome to AUT MCS Principles of Operating Systems Course. This message is from a custom logger implemented by student_number_1 and student_number_2");
+    log_message(WARN, "This is a test warning message for the custom logger");
+    log_message(ERROR, "This is a test error message for the custom logger");
+
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");

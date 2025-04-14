@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "logger_custom.h"
 
 uint64
 sys_exit(void)
@@ -13,6 +14,13 @@ sys_exit(void)
   argint(0, &n);
   exit(n);
   return 0;  // not reached
+}
+
+uint64
+sys_trigger(void)
+{
+    log_message(INFO, "This is a log to test a new xv6 system call");
+    return 0;
 }
 
 uint64
