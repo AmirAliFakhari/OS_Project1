@@ -1,8 +1,11 @@
 // Shell.
-
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/fs.h"
+
+#define BLUE "\x1b[34m"
+#define RESET "\x1b[0m"
 
 // Parsed command representation
 #define EXEC  1
@@ -54,7 +57,55 @@ void panic(char*);
 struct cmd *parsecmd(char*);
 void runcmd(struct cmd*) __attribute__((noreturn));
 
-// Execute cmd.  Never returns.
+
+
+// Custom strstr implementation
+char* strstr(const char *haystack, const char *needle) {
+  if(!*needle) return (char*)haystack;
+  for(; *haystack; haystack++) {
+    const char *h = haystack;
+    const char *n = needle;
+    while(*h && *n && *h == *n) {
+      h++;
+      n++;
+    }
+    if(!*n) return (char*)haystack;
+  }
+  return 0;
+}
+
+// Custom string length function
+int string_length(const char *s) {
+  int len = 0;
+  while(s[len]) len++;
+  return len;
+}
+
+// Custom string comparison
+int string_compare(const char *p, const char *q) {
+  while(*p && *p == *q)
+    p++, q++;
+  return (unsigned char)*p - (unsigned char)*q;
+}
+
+
+void print_message(char* msg) {
+  int i = 0;
+  while (msg[i]) {
+    if (msg[i] == 'o' && msg[i+1] == 's') {
+      write(1, "\x1b[34m", 5);  // BLUE
+      write(1, "os", 2);
+      write(1, "\x1b[0m", 4);   // RESET
+      i += 2;  // Skip the "os" we just printed
+    } else {
+      write(1, &msg[i], 1);
+      i++;
+    }
+  }
+  printf("\n"); 
+}
+
+// Modified runcmd function
 void
 runcmd(struct cmd *cmd)
 {
@@ -73,12 +124,43 @@ runcmd(struct cmd *cmd)
     panic("runcmd");
 
   case EXEC:
-    ecmd = (struct execcmd*)cmd;
-    if(ecmd->argv[0] == 0)
-      exit(1);
-    exec(ecmd->argv[0], ecmd->argv);
-    fprintf(2, "exec %s failed\n", ecmd->argv[0]);
-    break;
+      ecmd = (struct execcmd*)cmd;
+      if (ecmd->argv[0] == 0)
+        exit(1);
+        
+      if (string_compare(ecmd->argv[0], "!") == 0) {
+        char message[513];
+        int pos = 0;
+        
+        // Concatenate arguments with spaces
+        for (int i = 1; ecmd->argv[i]; i++) {
+          char *arg = ecmd->argv[i];
+          int arg_len = string_length(arg);
+          
+          // Add space between arguments
+          if (i > 1) {
+            if (pos >= 512) goto too_long;
+            message[pos++] = ' ';
+          }
+          
+          // Copy argument
+          for (int j = 0; j < arg_len; j++) {
+            if (pos >= 512) goto too_long;
+            message[pos++] = arg[j];
+          }
+        }
+        message[pos] = '\0';
+        
+        print_message(message);
+        break;
+        
+      too_long:
+        printf("Message too long\n");
+        break;
+      }
+      exec(ecmd->argv[0], ecmd->argv);
+      fprintf(2, "exec %s failed\n", ecmd->argv[0]);
+      break;
 
   case REDIR:
     rcmd = (struct redircmd*)cmd;
