@@ -193,3 +193,6 @@ void log_message(enum log_level, const char*);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+// kernel/defs.h
+extern uint64 sys_trigger(void);
