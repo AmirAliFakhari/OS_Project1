@@ -1,3 +1,5 @@
+#include "logger_custom.h"
+
 struct buf;
 struct context;
 struct file;
@@ -185,5 +187,12 @@ void            virtio_disk_init(void);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
+
+// kernel/defs.h
+void log_message(enum log_level, const char*);
+
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+// kernel/defs.h
+extern uint64 sys_trigger(void);
