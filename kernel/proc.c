@@ -161,6 +161,94 @@ freethread(struct thread *t)
   t->state = THREAD_UNUSED;
 }
 
+struct thread*
+initthread(struct proc *p)
+{
+  // اگر فرآیند هنوز نخ فعالی ندارد (اولین بار است که اجرا می‌شود)
+  if (!p->current_thread) {
+    // ابتدا تمام اسلات‌های نخ را پاکسازی کن
+    for (int i = 0; i < NTHREAD; ++i) {
+      p->threads[i].trapframe = 0;
+      freethread(&p->threads[i]);
+    }
+    
+    // نخ اول (p->threads[0]) را به عنوان نخ اصلی در نظر بگیر
+    struct thread *t = &p->threads[0];
+    t->id = p->pid; // شناسه نخ اصلی همان شناسه فرآیند است
+    
+    // برای نخ اصلی یک trapframe تخصیص بده
+    if ((t->trapframe = (struct trapframe *)kalloc()) == 0) {
+      freethread(t);
+      return 0;
+    }
+
+    t->state = THREAD_RUNNING; // وضعیت نخ اصلی در حال اجراست
+    p->current_thread = t; // آن را به عنوان نخ فعلی فرآیند تنظیم کن
+  }
+  return p->current_thread;
+}
+
+
+int
+thread_schd(struct proc *p) {
+  if (!p->current_thread) {
+    return 1; // اگر نخ فعالی وجود ندارد، اجازه بده فرآیند زمان‌بندی شود
+  }
+
+  // وضعیت نخ فعلی را از RUNNING به RUNNABLE تغییر بده
+  if (p->current_thread->state == THREAD_RUNNING) {
+    p->current_thread->state = THREAD_RUNNABLE;
+  }
+
+  // زمان فعلی سیستم را بگیر
+  acquire(&tickslock);
+  uint ticks = ticks;
+  release(&tickslock);
+
+  struct thread *next = 0;
+  // از نخ بعدی شروع به جستجو کن (برای实现 round-robin)
+  struct thread *t = p->current_thread + 1;
+
+  for (int i = 0; i < NTHREAD; i++, t++) {
+    // اگر به انتهای آرایه رسیدی، از اول شروع کن
+    if (t >= p->threads + NTHREAD) {
+      t = p->threads;
+    }
+    
+    // اگر یک نخ آماده پیدا شد، آن را انتخاب کن
+    if (t->state == THREAD_RUNNABLE) {
+      next = t;
+      break;
+    } 
+    // یا اگر نخ در حال خواب بود و زمان خوابش تمام شده، بیدارش کن و انتخابش کن
+    else if (t->state == THREAD_SLEEPING && (ticks - t->sleep_tick0 >= t->sleep_n)) {
+      next = t;
+      break;
+    }
+  }
+
+  // اگر هیچ نخ آماده‌ای پیدا نشد، همان نخ قبلی را اجرا کن
+  if (next == 0) {
+    p->current_thread->state = THREAD_RUNNING;
+    return 1;
+  } 
+  // اگر نخ جدیدی پیدا شد
+  else if (p->current_thread != next) {
+    next->state = THREAD_RUNNING;
+    struct thread *t = p->current_thread;
+    p->current_thread = next;
+    
+    // trapframe نخ قبلی را ذخیره کن
+    if (t->trapframe) {
+      *t->trapframe = *p->trapframe;
+    }
+    // و trapframe نخ جدید را بارگذاری کن
+    *p->trapframe = *next->trapframe;
+  }
+  return 1;
+}
+
+
 // تابع allocthread برای ایجاد و مقداردهی اولیه یک نخ جدید
 struct thread*
 allocthread(uint64 start_thread, uint64 stack_address, uint64 arg)
@@ -204,6 +292,96 @@ allocthread(uint64 start_thread, uint64 stack_address, uint64 arg)
     }
   }
   return 0; // اگر هیچ نخ خالی‌ای پیدا نشد
+}
+
+
+
+void
+exitthread(void)
+{
+  struct proc *p = myproc();
+  uint id = p->current_thread->id;
+
+  // بگرد و هر نخی را که منتظر (join) این نخ بوده، بیدار کن
+  for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
+    if (t->state == THREAD_JOINED && t->join == id) {
+      t->join = 0;
+      t->state = THREAD_RUNNABLE;
+    }
+  }
+
+  // منابع این نخ را آزاد کن
+  freethread(p->current_thread);
+
+  // اگر هیچ نخ قابل اجرای دیگری وجود نداشت، فرآیند را بکش
+  if (!thread_schd(p)) // این تابع را بعداً پیاده‌سازی می‌کنیم
+    setkilled(p);
+  
+  // برای همیشه در زمان‌بند بمان (این نخ دیگر باز نخواهد گشت)
+  sched();
+  panic("zombie thread exit");
+}
+
+// تابع jointhread برای منتظر ماندن برای یک نخ دیگر
+int
+jointhread(uint join_id)
+{
+  struct proc *p = myproc();
+  struct thread *t = p->current_thread;
+
+  if (!t)
+    return -3; // خطای داخلی: نخ جاری وجود ندارد
+
+  // بررسی برای جلوگیری از بن‌بست (deadlock)
+  // یک نخ نمی‌تواند به خودش یا نخی که منتظر اوست بپیوندد
+  int found = 0;
+  uint current_id = join_id;
+  while (current_id != 0) {
+    if (current_id == t->id)
+      return -1; // بن‌بست شناسایی شد
+    
+    uint target_id = current_id;
+    current_id = 0;
+    for (int i = 0; i < NTHREAD; i++) {
+      if (p->threads[i].id == target_id) {
+        current_id = p->threads[i].join;
+        found = 1;
+        break;
+      }
+    }
+  }
+
+  if (!found && join_id != 0)
+    return -2; // شناسه نخ مورد نظر پیدا نشد
+
+  // وضعیت نخ جاری را به JOINED تغییر بده و مشخص کن منتظر کدام نخ است
+  t->join = join_id;
+  t->state = THREAD_JOINED;
+
+  // اجرای خود را واگذار کن تا زمان‌بند یک نخ دیگر را اجرا کند
+  yield();
+  
+  return 0;
+}
+
+
+void
+sleepthread(int n, uint ticks0)
+{
+  struct thread *t = myproc()->current_thread;
+
+  // تعداد تیک‌هایی که نخ باید بخوابد را ذخیره کن
+  t->sleep_n = n;
+  // زمان شروع خواب را ذخیره کن
+  t->sleep_tick0 = ticks0;
+  // وضعیت نخ را به SLEEPING تغییر بده
+  t->state = THREAD_SLEEPING;
+
+  // زمان‌بند را فراخوانی کن تا یک نخ دیگر را اجرا کند
+  thread_schd(myproc()); // این تابع را در مرحله بعد می‌نویسیم
+
+  // این تابع نباید مستقیماً به اینجا برگردد،
+  // بلکه باید از طریق scheduler دوباره اجرا شود.
 }
 
 // free a proc structure and the data hanging from it,
