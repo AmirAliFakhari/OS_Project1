@@ -190,120 +190,115 @@ initthread(struct proc *p)
 }
 
 
+// در فایل kernel/proc.c - نسخه نهایی و صحیح thread_schd
+
+// در فایل kernel/proc.c - نسخه نهایی و صحیح thread_schd
+
 int
 thread_schd(struct proc *p) {
   if (!p->current_thread) {
-    return 1; // اگر نخ فعالی وجود ندارد، اجازه بده فرآیند زمان‌بندی شود
+    return 1;
   }
 
-  // وضعیت نخ فعلی را از RUNNING به RUNNABLE تغییر بده
-  if (p->current_thread->state == THREAD_RUNNING) {
-    p->current_thread->state = THREAD_RUNNABLE;
+  struct thread *old_t = p->current_thread;
+
+  if (old_t->state == THREAD_RUNNING) {
+    old_t->state = THREAD_RUNNABLE;
   }
 
-  // زمان فعلی سیستم را بگیر
   acquire(&tickslock);
-  uint ticks = ticks;
+  uint ticks_now = ticks;
   release(&tickslock);
 
   struct thread *next = 0;
-  // از نخ بعدی شروع به جستجو کن (برای实现 round-robin)
-  struct thread *t = p->current_thread + 1;
+  struct thread *t = old_t + 1;
 
   for (int i = 0; i < NTHREAD; i++, t++) {
-    // اگر به انتهای آرایه رسیدی، از اول شروع کن
     if (t >= p->threads + NTHREAD) {
       t = p->threads;
     }
     
-    // اگر یک نخ آماده پیدا شد، آن را انتخاب کن
     if (t->state == THREAD_RUNNABLE) {
       next = t;
       break;
     } 
-    // یا اگر نخ در حال خواب بود و زمان خوابش تمام شده، بیدارش کن و انتخابش کن
-    else if (t->state == THREAD_SLEEPING && (ticks - t->sleep_tick0 >= t->sleep_n)) {
+    else if (t->state == THREAD_SLEEPING && (ticks_now - t->sleep_tick0 >= t->sleep_n)) {
       next = t;
       break;
     }
   }
 
-  // اگر هیچ نخ آماده‌ای پیدا نشد، همان نخ قبلی را اجرا کن
   if (next == 0) {
-    p->current_thread->state = THREAD_RUNNING;
+    if(old_t->state == THREAD_RUNNABLE) {
+      old_t->state = THREAD_RUNNING;
+    }
     return 1;
   } 
-  // اگر نخ جدیدی پیدا شد
-  else if (p->current_thread != next) {
+  else if (old_t != next) {
     next->state = THREAD_RUNNING;
-    struct thread *t = p->current_thread;
     p->current_thread = next;
     
-    // trapframe نخ قبلی را ذخیره کن
-    if (t->trapframe) {
-      *t->trapframe = *p->trapframe;
+    // --- *** این بخش کلیدی و اصلاح شده است *** ---
+    // فقط در صورتی وضعیت نخ قدیمی را ذخیره کن که قرار نیست خاتمه یابد
+    // وقتی exitthread فراخوانی می‌شود، وضعیت نخ UNUSED می‌شود و این شرط برقرار نیست.
+    if(old_t->state != THREAD_UNUSED) {
+        *old_t->trapframe = *p->trapframe;
     }
-    // و trapframe نخ جدید را بارگذاری کن
     *p->trapframe = *next->trapframe;
+    // --- *** پایان بخش اصلاح شده *** ---
   }
   return 1;
 }
 
 
-// تابع allocthread برای ایجاد و مقداردهی اولیه یک نخ جدید
+
+// در فایل kernel/proc.c
+
 struct thread*
 allocthread(uint64 start_thread, uint64 stack_address, uint64 arg)
 {
   struct proc *p = myproc();
 
-  // در راهنما اینجا فراخوانی initthread آمده، اما ما آن را بعدا پیاده می‌کنیم.
-  // فعلا فرض می‌کنیم ترد اصلی قبلا ساخته شده.
+  // این خط حیاتی را اضافه کنید
+  if (!initthread(p))
+    return 0;
 
-  // در آرایه نخ‌های فرآیند، به دنبال یک اسلات خالی بگرد
+  // بقیه کد تابع بدون تغییر باقی می‌ماند
   for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
     if (t->state == THREAD_UNUSED) {
-      t->id = allocpid(); // از همان تخصیص‌دهنده pid برای شناسه نخ استفاده می‌کنیم
+      t->id = allocpid();
       
-      // برای نخ جدید یک trapframe تخصیص بده
       if ((t->trapframe = (struct trapframe *)kalloc()) == 0) {
         freethread(t);
-        return 0; // اگر حافظه نبود، خطا برگردان
+        return 0;
       }
-
-      // وضعیت نخ را آماده به اجرا قرار بده
-      t->state = THREAD_RUNNABLE;
-
-      // trapframe نخ جدید را از روی trapframe فرآیند اصلی کپی کن
-      *t->trapframe = *p->trapframe;
-
-      // اشاره‌گر پشته (sp) را روی پشته‌ای که کاربر داده تنظیم کن
-      t->trapframe->sp = stack_address;
       
-      // آرگومان ورودی را در رجیستر a0 قرار بده
+      memset(t->trapframe, 0, sizeof(struct trapframe));
+
+      t->trapframe->epc = start_thread;
+      t->trapframe->sp = stack_address;
       t->trapframe->a0 = arg;
-
-      // آدرس بازگشت (ra) را -1 قرار می‌دهیم تا مشخص شود این نخ
-      // هرگز نباید از تابع شروع خود return کند. باید با exitthread خارج شود.
       t->trapframe->ra = -1;
-
-      // شمارنده برنامه (epc) را روی آدرس تابع شروع نخ تنظیم کن
-      t->trapframe->epc = (uint64)start_thread;
-
-      return t; // اشاره‌گر به نخ جدید را برگردان
+      
+      t->state = THREAD_RUNNABLE;
+      return t;
     }
   }
-  return 0; // اگر هیچ نخ خالی‌ای پیدا نشد
+  return 0;
 }
 
 
+
+// در فایل kernel/proc.c - نسخه نهایی و صحیح exitthread
 
 void
 exitthread(void)
 {
   struct proc *p = myproc();
-  uint id = p->current_thread->id;
+  struct thread *to_free = p->current_thread;
+  uint id = to_free->id;
 
-  // بگرد و هر نخی را که منتظر (join) این نخ بوده، بیدار کن
+  // هر نخی که منتظر این نخ بوده را بیدار کن
   for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
     if (t->state == THREAD_JOINED && t->join == id) {
       t->join = 0;
@@ -311,17 +306,16 @@ exitthread(void)
     }
   }
 
-  // منابع این نخ را آزاد کن
-  freethread(p->current_thread);
-
-  // اگر هیچ نخ قابل اجرای دیگری وجود نداشت، فرآیند را بکش
-  if (!thread_schd(p)) // این تابع را بعداً پیاده‌سازی می‌کنیم
+  // ابتدا نخ بعدی را پیدا کرده و context switch را انجام بده
+  if (!thread_schd(p)) {
+    // اگر هیچ نخ دیگری نبود، کل فرآیند را بکش
     setkilled(p);
-  
-  // برای همیشه در زمان‌بند بمان (این نخ دیگر باز نخواهد گشت)
-  sched();
-  panic("zombie thread exit");
+  }
+
+  // حالا که دیگر در کانتکست این نخ نیستیم، با خیال راحت آن را آزاد کن
+  freethread(to_free);
 }
+
 
 // تابع jointhread برای منتظر ماندن برای یک نخ دیگر
 int
