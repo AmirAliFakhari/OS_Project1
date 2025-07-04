@@ -149,6 +149,63 @@ found:
   return p;
 }
 
+
+void
+freethread(struct thread *t)
+{
+  if (t->trapframe)
+    kfree((void*)t->trapframe);
+  t->trapframe = 0;
+  t->id = 0;
+  t->join = 0;
+  t->state = THREAD_UNUSED;
+}
+
+// تابع allocthread برای ایجاد و مقداردهی اولیه یک نخ جدید
+struct thread*
+allocthread(uint64 start_thread, uint64 stack_address, uint64 arg)
+{
+  struct proc *p = myproc();
+
+  // در راهنما اینجا فراخوانی initthread آمده، اما ما آن را بعدا پیاده می‌کنیم.
+  // فعلا فرض می‌کنیم ترد اصلی قبلا ساخته شده.
+
+  // در آرایه نخ‌های فرآیند، به دنبال یک اسلات خالی بگرد
+  for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
+    if (t->state == THREAD_UNUSED) {
+      t->id = allocpid(); // از همان تخصیص‌دهنده pid برای شناسه نخ استفاده می‌کنیم
+      
+      // برای نخ جدید یک trapframe تخصیص بده
+      if ((t->trapframe = (struct trapframe *)kalloc()) == 0) {
+        freethread(t);
+        return 0; // اگر حافظه نبود، خطا برگردان
+      }
+
+      // وضعیت نخ را آماده به اجرا قرار بده
+      t->state = THREAD_RUNNABLE;
+
+      // trapframe نخ جدید را از روی trapframe فرآیند اصلی کپی کن
+      *t->trapframe = *p->trapframe;
+
+      // اشاره‌گر پشته (sp) را روی پشته‌ای که کاربر داده تنظیم کن
+      t->trapframe->sp = stack_address;
+      
+      // آرگومان ورودی را در رجیستر a0 قرار بده
+      t->trapframe->a0 = arg;
+
+      // آدرس بازگشت (ra) را -1 قرار می‌دهیم تا مشخص شود این نخ
+      // هرگز نباید از تابع شروع خود return کند. باید با exitthread خارج شود.
+      t->trapframe->ra = -1;
+
+      // شمارنده برنامه (epc) را روی آدرس تابع شروع نخ تنظیم کن
+      t->trapframe->epc = (uint64)start_thread;
+
+      return t; // اشاره‌گر به نخ جدید را برگردان
+    }
+  }
+  return 0; // اگر هیچ نخ خالی‌ای پیدا نشد
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
