@@ -55,6 +55,7 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      p->current_thread = 0;
   }
 }
 
@@ -149,6 +150,235 @@ found:
   return p;
 }
 
+
+void
+freethread(struct thread *t)
+{
+  if (t->trapframe)
+    kfree((void*)t->trapframe);
+  t->trapframe = 0;
+  t->id = 0;
+  t->join = 0;
+  t->state = THREAD_UNUSED;
+}
+
+struct thread*
+initthread(struct proc *p)
+{
+  // اگر فرآیند هنوز نخ فعالی ندارد (اولین بار است که اجرا می‌شود)
+  if (!p->current_thread) {
+    // ابتدا تمام اسلات‌های نخ را پاکسازی کن
+    for (int i = 0; i < NTHREAD; ++i) {
+      p->threads[i].trapframe = 0;
+      freethread(&p->threads[i]);
+    }
+    
+    // نخ اول (p->threads[0]) را به عنوان نخ اصلی در نظر بگیر
+    struct thread *t = &p->threads[0];
+    t->id = p->pid; // شناسه نخ اصلی همان شناسه فرآیند است
+    
+    // برای نخ اصلی یک trapframe تخصیص بده
+    if ((t->trapframe = (struct trapframe *)kalloc()) == 0) {
+      freethread(t);
+      return 0;
+    }
+
+    t->state = THREAD_RUNNING; // وضعیت نخ اصلی در حال اجراست
+    p->current_thread = t; // آن را به عنوان نخ فعلی فرآیند تنظیم کن
+  }
+  return p->current_thread;
+}
+
+
+// در فایل kernel/proc.c - نسخه نهایی و صحیح thread_schd
+
+// در فایل kernel/proc.c - نسخه نهایی و صحیح thread_schd
+
+int
+thread_schd(struct proc *p) {
+  if (!p->current_thread) {
+    return 1;
+  }
+
+  struct thread *old_t = p->current_thread;
+
+  if (old_t->state == THREAD_RUNNING) {
+    old_t->state = THREAD_RUNNABLE;
+  }
+
+  acquire(&tickslock);
+  uint ticks_now = ticks;
+  release(&tickslock);
+
+  struct thread *next = 0;
+  struct thread *t = old_t + 1;
+
+  for (int i = 0; i < NTHREAD; i++, t++) {
+    if (t >= p->threads + NTHREAD) {
+      t = p->threads;
+    }
+    
+    if (t->state == THREAD_RUNNABLE) {
+      next = t;
+      break;
+    } 
+    else if (t->state == THREAD_SLEEPING && (ticks_now - t->sleep_tick0 >= t->sleep_n)) {
+      next = t;
+      break;
+    }
+  }
+
+  if (next == 0) {
+    if(old_t->state == THREAD_RUNNABLE) {
+      old_t->state = THREAD_RUNNING;
+    }
+    return 1;
+  } 
+  else if (old_t != next) {
+    next->state = THREAD_RUNNING;
+    p->current_thread = next;
+    
+    // --- *** این بخش کلیدی و اصلاح شده است *** ---
+    // فقط در صورتی وضعیت نخ قدیمی را ذخیره کن که قرار نیست خاتمه یابد
+    // وقتی exitthread فراخوانی می‌شود، وضعیت نخ UNUSED می‌شود و این شرط برقرار نیست.
+    if(old_t->state != THREAD_UNUSED) {
+        *old_t->trapframe = *p->trapframe;
+    }
+    *p->trapframe = *next->trapframe;
+    // --- *** پایان بخش اصلاح شده *** ---
+  }
+  return 1;
+}
+
+
+
+// در فایل kernel/proc.c
+
+struct thread*
+allocthread(uint64 start_thread, uint64 stack_address, uint64 arg)
+{
+  struct proc *p = myproc();
+
+  // این خط حیاتی را اضافه کنید
+  if (!initthread(p))
+    return 0;
+
+  // بقیه کد تابع بدون تغییر باقی می‌ماند
+  for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
+    if (t->state == THREAD_UNUSED) {
+      t->id = allocpid();
+      
+      if ((t->trapframe = (struct trapframe *)kalloc()) == 0) {
+        freethread(t);
+        return 0;
+      }
+      
+      memset(t->trapframe, 0, sizeof(struct trapframe));
+
+      t->trapframe->epc = start_thread;
+      t->trapframe->sp = stack_address;
+      t->trapframe->a0 = arg;
+      t->trapframe->ra = -1;
+      
+      t->state = THREAD_RUNNABLE;
+      return t;
+    }
+  }
+  return 0;
+}
+
+
+
+// در فایل kernel/proc.c - نسخه نهایی و صحیح exitthread
+
+void
+exitthread(void)
+{
+  struct proc *p = myproc();
+  struct thread *to_free = p->current_thread;
+  uint id = to_free->id;
+
+  // هر نخی که منتظر این نخ بوده را بیدار کن
+  for (struct thread *t = p->threads; t < p->threads + NTHREAD; t++) {
+    if (t->state == THREAD_JOINED && t->join == id) {
+      t->join = 0;
+      t->state = THREAD_RUNNABLE;
+    }
+  }
+
+  // ابتدا نخ بعدی را پیدا کرده و context switch را انجام بده
+  if (!thread_schd(p)) {
+    // اگر هیچ نخ دیگری نبود، کل فرآیند را بکش
+    setkilled(p);
+  }
+
+  // حالا که دیگر در کانتکست این نخ نیستیم، با خیال راحت آن را آزاد کن
+  freethread(to_free);
+}
+
+
+// تابع jointhread برای منتظر ماندن برای یک نخ دیگر
+int
+jointhread(uint join_id)
+{
+  struct proc *p = myproc();
+  struct thread *t = p->current_thread;
+
+  if (!t)
+    return -3; // خطای داخلی: نخ جاری وجود ندارد
+
+  // بررسی برای جلوگیری از بن‌بست (deadlock)
+  // یک نخ نمی‌تواند به خودش یا نخی که منتظر اوست بپیوندد
+  int found = 0;
+  uint current_id = join_id;
+  while (current_id != 0) {
+    if (current_id == t->id)
+      return -1; // بن‌بست شناسایی شد
+    
+    uint target_id = current_id;
+    current_id = 0;
+    for (int i = 0; i < NTHREAD; i++) {
+      if (p->threads[i].id == target_id) {
+        current_id = p->threads[i].join;
+        found = 1;
+        break;
+      }
+    }
+  }
+
+  if (!found && join_id != 0)
+    return -2; // شناسه نخ مورد نظر پیدا نشد
+
+  // وضعیت نخ جاری را به JOINED تغییر بده و مشخص کن منتظر کدام نخ است
+  t->join = join_id;
+  t->state = THREAD_JOINED;
+
+  // اجرای خود را واگذار کن تا زمان‌بند یک نخ دیگر را اجرا کند
+  yield();
+  
+  return 0;
+}
+
+
+void
+sleepthread(int n, uint ticks0)
+{
+  struct thread *t = myproc()->current_thread;
+
+  // تعداد تیک‌هایی که نخ باید بخوابد را ذخیره کن
+  t->sleep_n = n;
+  // زمان شروع خواب را ذخیره کن
+  t->sleep_tick0 = ticks0;
+  // وضعیت نخ را به SLEEPING تغییر بده
+  t->state = THREAD_SLEEPING;
+
+  // زمان‌بند را فراخوانی کن تا یک نخ دیگر را اجرا کند
+  thread_schd(myproc()); // این تابع را در مرحله بعد می‌نویسیم
+
+  // این تابع نباید مستقیماً به اینجا برگردد،
+  // بلکه باید از طریق scheduler دوباره اجرا شود.
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -169,6 +399,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  p->current_thread = 0; // نخ فعلی را null کن
+  for (int i = 0; i < NTHREAD; ++i) {
+    freethread(&p->threads[i]); // تمام نخ‌های فرآیند را آزاد کن
+  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -449,37 +684,27 @@ scheduler(void)
 
   c->proc = 0;
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting.
     intr_on();
-
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+        if (thread_schd(p)) { 
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          found = 1;
+        }
       }
       release(&p->lock);
     }
     if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
       intr_on();
       asm volatile("wfi");
     }
   }
 }
-
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this

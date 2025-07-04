@@ -67,6 +67,12 @@ sys_sleep(void)
     n = 0;
   acquire(&tickslock);
   ticks0 = ticks;
+  if (myproc()->current_thread) {
+    release(&tickslock);
+    sleepthread(n, ticks0); // تابع جدید خواب برای نخ را صدا بزن
+    return 0;
+  }
+
   while(ticks - ticks0 < n){
     if(killed(myproc())){
       release(&tickslock);
@@ -98,4 +104,33 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+
+uint64
+sys_thread(void) {
+  uint64 start_thread, stack_address, arg;
+  
+  // خواندن آرگومان‌ها از فضای کاربر
+  argaddr(0, &start_thread);
+  argaddr(1, &stack_address);
+  argaddr(2, &arg);
+
+  // فراخوانی تابع اصلی برای تخصیص و ساخت نخ (این تابع را بعدا می‌نویسیم)
+  struct thread *t = allocthread(start_thread, stack_address, arg);
+
+  // اگر نخ با موفقیت ساخته شد، شناسه آن را برگردان
+  return t ? t->id : 0;
+}
+
+// تابع sys_jointhread برای پیوستن به یک نخ
+uint64
+sys_jointhread(void) {
+  int id;
+
+  // خواندن شناسه نخ مورد نظر از فضای کاربر
+  argint(0, &id);
+  
+  // فراخوانی تابع اصلی برای پیوستن به نخ (این تابع را بعدا می‌نویسیم)
+  return jointhread(id);
 }
